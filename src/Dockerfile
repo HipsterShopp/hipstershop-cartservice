@@ -6,7 +6,7 @@ COPY . .
 RUN dotnet publish cartservice.csproj \
     -c release \
     -o /cartservice
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
 WORKDIR /app
 COPY --from=builder /cartservice .
 EXPOSE 7070
