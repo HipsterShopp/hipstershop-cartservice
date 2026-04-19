@@ -1,16 +1,20 @@
-name: cart service CI
 
-run-name: "cart service — ${{ github.event.head_commit.message || github.event.pull_request.title }} (${{ github.sha }})"
+name: cartservice CI
+
+run-name: "cartservice — ${{ github.event.head_commit.message || github.event.pull_request.title }} (${{ github.sha }})"
 
 on:
   push:
-    branches: [main, develop]
+    branches:
+      - main
+      - develop
     paths:
       - 'src/**'
       - '.github/workflows/cartservice.yaml'
-
   pull_request:
-    branches: [main, develop]
+    branches:
+      - main
+      - develop
     paths:
       - 'src/**'
       - '.github/workflows/cartservice.yaml'
@@ -18,15 +22,18 @@ on:
 permissions:
   contents: write
 
+
 jobs:
 
   sonar-and-snyk:
     if: github.event_name == 'pull_request'
-    uses: HipsterShopp/hipstershop-shared-workflows/.github/workflows/sonar-and-snyk.yaml@main
+    uses: HipsterShopp/hipstershop-shared-workflows/.github/workflows/sonar-and-snyk.yaml@feature/loose-coupling
     with:
       service_name: cartservice
       service_path: src/
-      runtime: dotnet  # node | java | go | python | dotnet
+      runtime: java
+      java-version: "21"
+      java-build-tool: "gradle"
     secrets:
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -40,7 +47,7 @@ jobs:
         (github.event_name == 'pull_request' && needs.sonar-and-snyk.result == 'success') ||
         github.event_name == 'push'
       )
-    uses: HipsterShopp/hipstershop-shared-workflows/.github/workflows/generate-tag-and-build-image-trivy.yaml@main
+    uses: HipsterShopp/hipstershop-shared-workflows/.github/workflows/generate-tag-and-build-image-trivy.yaml@feature/loose-coupling
     with:
       service_name: cartservice
       service_path: src/
@@ -55,7 +62,7 @@ jobs:
       always() &&
       github.event_name == 'push' &&
       needs.generate-tag-and-build-image.result == 'success'
-    uses: HipsterShopp/hipstershop-shared-workflows/.github/workflows/push.yaml@main
+    uses: HipsterShopp/hipstershop-shared-workflows/.github/workflows/push.yaml@feature/loose-coupling
     with:
       service_name: cartservice
       git_tag: ${{ needs.generate-tag-and-build-image.outputs.tag }}
@@ -64,13 +71,61 @@ jobs:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
-  # NOTE: No update-helm-values step here.
-  # ArgoCD Image Updater will detect and update automatically.
+
+  # update helm values for dev
+  update-helm-values-dev:
+    needs: [push, generate-tag-and-build-image]
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      github.ref_name == 'develop' &&
+      needs.push.result == 'success'
+    uses: HipsterShopp/hipstershop-shared-workflows/.github/workflows/helm-updater-job.yaml@feature/loose-coupling
+    with:
+      service_name: cartservice
+      image_tag: ${{ needs.generate-tag-and-build-image.outputs.tag }}
+      helm_values_path: "hipstershop-micro-apps/cartservice/values.dev.yaml"
+      target_branch: "develop"
+    secrets:
+      HELM_CHARTS_TOKEN: ${{ secrets.HELM_CHARTS_TOKEN }}
+
+
+  # update helm values for prod (requires manual approval via GitHub Environment)
+  # GitHub does NOT allow environment: + uses: in the same job.
+  # So we use a two-step pattern:
+  #   1. prod-approval-gate  — a regular job with environment: production (this is what triggers the pause)
+  #   2. update-helm-values-prod — runs after the gate is approved
+  prod-approval-gate:
+    needs: [push, generate-tag-and-build-image]
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      github.ref_name == 'main' &&
+      needs.push.result == 'success'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Approved — proceeding to update Helm chart for Production
+        run: echo "Production deployment approved for tag ${{ needs.generate-tag-and-build-image.outputs.tag }}"
+
+  update-helm-values-prod:
+    needs: [prod-approval-gate, generate-tag-and-build-image]
+    if: |
+      always() &&
+      needs.prod-approval-gate.result == 'success'
+    uses: HipsterShopp/hipstershop-shared-workflows/.github/workflows/helm-updater-job.yaml@feature/loose-coupling
+    with:
+      service_name: cartservice
+      image_tag: ${{ needs.generate-tag-and-build-image.outputs.tag }}
+      helm_values_path: "hipstershop-micro-apps/cartservice/values.prod.yaml"
+      target_branch: "main"
+    secrets:
+      HELM_CHARTS_TOKEN: ${{ secrets.HELM_CHARTS_TOKEN }}
 
   notify:
-    needs: [sonar-and-snyk, generate-tag-and-build-image, push]
+    needs: [sonar-and-snyk, generate-tag-and-build-image, push, update-helm-values-dev, update-helm-values-prod]
     if: always()
-    uses: HipsterShopp/hipstershop-shared-workflows/.github/workflows/notify.yaml@main
+    uses: HipsterShopp/hipstershop-shared-workflows/.github/workflows/notify.yaml@feature/loose-coupling
     with:
       service_name: cartservice
       git_tag: ${{ needs.generate-tag-and-build-image.outputs.tag || 'N/A' }}
